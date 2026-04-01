@@ -9,5 +9,4 @@ dependencies = [
     "yfinance>=0.2.40",
     "plotly>=5.20",
     "numpy>=1.26",
-    "lxml>=6.0.2",
 ]
