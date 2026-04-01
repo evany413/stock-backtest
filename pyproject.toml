@@ -1,0 +1,12 @@
+[project]
+name = "stock-backtest"
+version = "0.1.0"
+description = "Personal finance & stock backtest tool"
+requires-python = ">=3.12"
+dependencies = [
+    "streamlit>=1.35",
+    "pandas>=2.2",
+    "yfinance>=0.2.40",
+    "plotly>=5.20",
+    "numpy>=1.26",
+]

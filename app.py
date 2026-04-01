@@ -1,196 +1,175 @@
-import streamlit as st
+"""
+app.py  –  Personal Finance Backtest
+Run:  uv run streamlit run app.py
+"""
+import traceback
+from datetime import datetime
+
 import pandas as pd
-import plotly.express as px
-import importlib
-import os
-import sys
-from datetime import datetime, timedelta
+import plotly.graph_objects as go
+import streamlit as st
 
-# Add current directory to path so we can import modules
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+import data as db
+from engine import list_strategies, load_strategy, run_backtest, calculate_metrics
 
-from strategy_engine import StrategyEngine
-from strategies.base_strategy import BaseStrategy
+st.set_page_config(page_title="Finance Backtest", layout="wide")
 
-st.set_page_config(page_title="US Stock Backtest Tool", layout="wide")
+@st.cache_resource
+def get_conn():
+    return db.get_db()
 
-st.title("US Stock Backtest Tool")
+conn = get_conn()
 
-# Sidebar: Strategy Selection
-st.sidebar.header("Strategy Settings")
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+st.sidebar.title("Settings")
 
-# Dynamic Strategy Loading
-STRATEGIES_DIR = os.path.join(os.path.dirname(__file__), 'strategies')
-strategy_files = [f[:-3] for f in os.listdir(STRATEGIES_DIR) if f.endswith('.py') and f != '__init__.py' and f != 'base_strategy.py']
-
-selected_strategy_name = st.sidebar.selectbox("Select Strategy", strategy_files)
-
-# Load Strategy Class
-strategy_module = importlib.import_module(f"strategies.{selected_strategy_name}")
-# Find the class that inherits from BaseStrategy
-strategy_class = None
-for name, obj in strategy_module.__dict__.items():
-    if isinstance(obj, type) and issubclass(obj, BaseStrategy) and obj is not BaseStrategy:
-        strategy_class = obj
-        break
-
-if not strategy_class:
-    st.error(f"No valid strategy class found in {selected_strategy_name}.py")
+# Strategy
+st.sidebar.header("Strategy")
+strategy_names = list_strategies()
+if not strategy_names:
+    st.sidebar.error("No strategies found in strategies/")
     st.stop()
 
-# Strategy Parameters
-st.sidebar.subheader("Strategy Parameters")
-# Hardcoded defaults are used in the strategy classes.
-# To change them, modify the strategy files directly.
-params = {}
+selected_name = st.sidebar.selectbox("Select Strategy", strategy_names)
 
-# Backtest Settings
-st.sidebar.subheader("Backtest Settings")
-# Expanded ticker universe - major stocks from different sectors
-# Tech: AAPL, MSFT, GOOG, AMZN, META, NVDA, TSLA
-# Finance: JPM, BAC, WFC, GS, MS
-# Healthcare: JNJ, UNH, PFE, ABBV
-# Consumer: WMT, HD, MCD, NKE, SBUX
-# Industrial: BA, CAT, GE, HON
-# Energy: XOM, CVX
-# You can modify this list to include any US stocks
-tickers = [
-    # Tech
-    'AAPL', 'MSFT', 'GOOG', 'AMZN', 'META', 'NVDA', 'TSLA', 'NFLX', 'ADBE', 'CRM',
-    # Finance
-    'JPM', 'BAC', 'WFC', 'GS', 'MS', 'C', 'BLK', 'SCHW',
-    # Healthcare
-    'JNJ', 'UNH', 'PFE', 'ABBV', 'TMO', 'MRK', 'LLY',
-    # Consumer
-    'WMT', 'HD', 'MCD', 'NKE', 'SBUX', 'TGT', 'COST',
-    # Industrial
-    'BA', 'CAT', 'GE', 'HON', 'UPS', 'RTX',
-    # Energy
-    'XOM', 'CVX', 'COP', 'SLB',
-    # Telecom
-    'T', 'VZ', 'TMUS',
-    # Other
-    'DIS', 'V', 'MA', 'PYPL'
-]
+with st.sidebar.expander("Strategy source"):
+    from pathlib import Path
+    path = Path("strategies") / f"{selected_name}.py"
+    st.code(path.read_text(encoding="utf-8"), language="python")
 
-# NOTE: yfinance only provides recent financial data (~8 quarters)
-# For fundamental strategies, use dates from 2024 onwards
-start_date = st.sidebar.date_input("Start Date", datetime(2024, 9, 1))
-end_date = st.sidebar.date_input("End Date", datetime(2025, 9, 1))
-initial_capital = st.sidebar.number_input("Initial Capital", value=100000.0)
-commission = st.sidebar.number_input("Commission per trade ($)", value=0.0)
+# Tickers
+st.sidebar.header("Ticker Universe")
+ticker_input = st.sidebar.text_area(
+    "Tickers (comma separated)",
+    value="AAPL, MSFT, GOOG, AMZN, META, NVDA, JPM, JNJ, V, WMT",
+)
+tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
 
-# Rebalancing Settings
-st.sidebar.subheader("Rebalancing")
-rebalance_freq_option = st.sidebar.selectbox("Rebalance Frequency", ['Daily', 'Weekly', 'Monthly', 'Custom'])
-rebalance_freq = rebalance_freq_option
-if rebalance_freq_option == 'Custom':
-    rebalance_freq = st.sidebar.number_input("Rebalance every N days", min_value=1, value=5)
+# Backtest settings
+st.sidebar.header("Backtest")
+col_a, col_b = st.sidebar.columns(2)
+start_date = col_a.date_input("Start", datetime(2023, 1, 1))
+end_date   = col_b.date_input("End",   datetime(2025, 1, 1))
+initial_capital = st.sidebar.number_input("Initial Capital ($)", value=100_000, step=10_000)
+rebalance_freq  = st.sidebar.selectbox("Rebalance", ["monthly", "weekly"])
 
-# Benchmark Settings
-st.sidebar.subheader("Benchmark Comparison")
-common_benchmarks = ['SPY', 'QQQ', 'DIA', 'IWM', 'VTI', 'TLT', 'GLD', 'AAPL', 'MSFT', 'GOOG', 'AMZN', 'TSLA', 'NVDA']
-selected_benchmarks = st.sidebar.multiselect("Select Benchmarks", common_benchmarks, default=['SPY'])
-custom_benchmark_input = st.sidebar.text_input("Add Custom Benchmark (comma separated)")
+# Income & tax
+st.sidebar.header("Income & Tax")
+monthly_income = st.sidebar.number_input("Monthly Income ($)", value=0, step=500,
+                                          help="Credited on the 1st trading day of each month")
+tax_rate = st.sidebar.slider("Capital Gains Tax Rate", 0.0, 0.5, 0.20, 0.01,
+                              format="%.0f%%",
+                              help="Applied once a year on total realized gains")
 
-if custom_benchmark_input:
-    custom_benchmarks = [t.strip().upper() for t in custom_benchmark_input.split(',') if t.strip()]
-    selected_benchmarks.extend(custom_benchmarks)
+# One-time expenses
+st.sidebar.header("One-Time Expenses")
+with st.sidebar.expander("Add expenses"):
+    if "expenses" not in st.session_state:
+        st.session_state["expenses"] = []
 
-# Remove duplicates
-selected_benchmarks = list(set(selected_benchmarks))
+    with st.form("add_expense", clear_on_submit=True):
+        e_label  = st.text_input("Label",  value="House down payment")
+        e_amount = st.number_input("Amount ($)", value=50_000, step=1_000)
+        e_date   = st.date_input("Date", value=datetime(2024, 6, 1))
+        if st.form_submit_button("Add"):
+            st.session_state["expenses"].append(
+                {"date": str(e_date), "label": e_label, "amount": float(e_amount)}
+            )
 
-if st.sidebar.button("Run Backtest"):
-    with st.spinner("Running Backtest..."):
-        # Initialize Strategy
-        strategy = strategy_class(params)
-        
-        # Initialize Engine
-        engine = StrategyEngine(initial_capital=initial_capital, commission=commission)
-        
-        # Run
+    if st.session_state["expenses"]:
+        st.dataframe(pd.DataFrame(st.session_state["expenses"]), use_container_width=True)
+        if st.button("Clear all expenses"):
+            st.session_state["expenses"] = []
+            st.rerun()
+
+run_btn = st.sidebar.button("Run Backtest", type="primary", use_container_width=True)
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+st.title("Personal Finance Backtest")
+
+if run_btn:
+    if start_date >= end_date:
+        st.error("Start date must be before end date.")
+        st.stop()
+
+    with st.spinner("Fetching data..."):
         try:
-            equity_curve = engine.run_backtest(strategy, tickers, start_date, end_date, rebalance_freq=rebalance_freq)
-            
-            if equity_curve.empty:
-                st.warning("No trades generated or no data available.")
-            else:
-                # Calculate Performance
-                metrics = engine.calculate_performance(equity_curve)
-                
-                # Fetch Benchmark Data
-                benchmark_data = pd.DataFrame()
-                
-                if selected_benchmarks:
-                    import yfinance as yf
-                    progress_text = "Loading benchmarks..."
-                    my_bar = st.progress(0, text=progress_text)
-                    
-                    for i, bench_ticker in enumerate(selected_benchmarks):
-                        try:
-                            # Disable threading here too
-                            bench_df = yf.download(bench_ticker, start=start_date, end=end_date, auto_adjust=True, threads=False)
-                            if not bench_df.empty:
-                                # Handle MultiIndex or Single Index
-                                if isinstance(bench_df.columns, pd.MultiIndex):
-                                    # If MultiIndex, it might be (Price, Ticker)
-                                    # Check if 'Close' is in levels
-                                    if 'Close' in bench_df.columns.get_level_values(0):
-                                        bench_close = bench_df['Close']
-                                    elif 'Close' in bench_df.columns:
-                                         bench_close = bench_df['Close']
-                                    else:
-                                        # Fallback
-                                        bench_close = bench_df.iloc[:, 0]
-                                    
-                                    # If it's still a DataFrame (e.g. multiple columns for one ticker?), squeeze it
-                                    if isinstance(bench_close, pd.DataFrame):
-                                        if bench_ticker in bench_close.columns:
-                                            bench_close = bench_close[bench_ticker]
-                                        else:
-                                            bench_close = bench_close.iloc[:, 0]
-                                else:
-                                    if 'Close' in bench_df.columns:
-                                        bench_close = bench_df['Close']
-                                    else:
-                                        bench_close = bench_df.iloc[:, 0]
-                                
-                                # Reindex to match equity curve
-                                bench_close = bench_close.reindex(equity_curve.index, method='ffill')
-                                
-                                # Normalize
-                                start_price = bench_close.iloc[0]
-                                if start_price > 0:
-                                    benchmark_equity = (bench_close / start_price) * initial_capital
-                                    benchmark_data[bench_ticker] = benchmark_equity
-                        except Exception as e:
-                            st.warning(f"Could not load benchmark {bench_ticker}: {e}")
-                        
-                        my_bar.progress((i + 1) / len(selected_benchmarks), text=progress_text)
-                    
-                    my_bar.empty()
-
-                # Display Metrics
-                col1, col2, col3 = st.columns(3)
-                col1.metric("CAGR", f"{metrics.get('CAGR', 0):.2%}")
-                col2.metric("Max Drawdown", f"{metrics.get('Max Drawdown', 0):.2%}")
-                col3.metric("Sharpe Ratio", f"{metrics.get('Sharpe Ratio', 0):.2f}")
-                
-                # Plot Equity Curve
-                # Combine Strategy and Benchmark
-                plot_data = equity_curve.rename(columns={'equity': 'Strategy'})
-                if not benchmark_data.empty:
-                    plot_data = pd.concat([plot_data, benchmark_data], axis=1)
-                
-                fig = px.line(plot_data, title="Equity Curve Comparison")
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Show raw data
-                with st.expander("View Equity Data"):
-                    st.dataframe(plot_data)
-                    
+            db.ensure_data(tickers, str(start_date), str(end_date), conn)
         except Exception as e:
-            st.error(f"An error occurred: {e}")
-            # print stack trace for debugging
-            import traceback
+            st.warning(f"Data fetch warning: {e}")
+
+    with st.spinner("Running backtest..."):
+        try:
+            strategy = load_strategy(selected_name)
+            equity_df, events_df = run_backtest(
+                strategy=strategy,
+                tickers=tickers,
+                start=str(start_date),
+                end=str(end_date),
+                initial_capital=float(initial_capital),
+                monthly_income=float(monthly_income),
+                expenses=st.session_state.get("expenses", []),
+                tax_rate=float(tax_rate),
+                rebalance_freq=rebalance_freq,
+                conn=conn,
+            )
+            st.session_state.update({
+                "equity_df": equity_df,
+                "events_df": events_df,
+                "metrics":   calculate_metrics(equity_df, initial_capital),
+                "run_name":  selected_name,
+            })
+        except RuntimeError as e:
+            st.error(str(e))
+            st.stop()
+        except Exception as e:
+            st.error(f"Error: {e}")
             st.text(traceback.format_exc())
+            st.stop()
+
+if "equity_df" in st.session_state and not st.session_state["equity_df"].empty:
+    equity_df = st.session_state["equity_df"]
+    events_df = st.session_state["events_df"]
+    metrics   = st.session_state["metrics"]
+
+    st.caption(f"Strategy: **{st.session_state['run_name']}**")
+
+    # Metrics row
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Final Net Worth",  f"${metrics['Final Net Worth']:,.0f}")
+    c2.metric("Total Return",     f"{metrics['Total Return']:.1%}")
+    c3.metric("CAGR",             f"{metrics['CAGR']:.1%}")
+    c4.metric("Max Drawdown",     f"{metrics['Max Drawdown']:.1%}")
+    c5.metric("Sharpe Ratio",     f"{metrics['Sharpe Ratio']:.2f}")
+
+    # Chart
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=equity_df.index, y=equity_df["net_worth"],
+                             name="Net Worth",     line=dict(color="#1f77b4", width=2)))
+    fig.add_trace(go.Scatter(x=equity_df.index, y=equity_df["portfolio"],
+                             name="Stock Portfolio", line=dict(color="#2ca02c", width=1.5)))
+    fig.add_trace(go.Scatter(x=equity_df.index, y=equity_df["cash"],
+                             name="Cash",          line=dict(color="#ff7f0e", dash="dot")))
+    fig.update_layout(yaxis_title="Value ($)", hovermode="x unified",
+                      legend=dict(orientation="h", y=1.02))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Cash flow summary
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Total Income",   f"${metrics['Total Income']:,.0f}")
+    r2.metric("Total Expenses", f"${metrics['Total Expenses']:,.0f}")
+    r3.metric("Total Taxes",    f"${metrics['Total Taxes']:,.0f}")
+
+    # Event log
+    if not events_df.empty:
+        t1, t2, t3 = st.tabs(["All Events", "Trades", "Income / Expenses / Tax"])
+        with t1:
+            st.dataframe(events_df, use_container_width=True, hide_index=True)
+        with t2:
+            st.dataframe(events_df[events_df["type"] == "trade"],
+                         use_container_width=True, hide_index=True)
+        with t3:
+            st.dataframe(events_df[events_df["type"] != "trade"],
+                         use_container_width=True, hide_index=True)
+else:
+    st.info("Configure settings in the sidebar and click **Run Backtest**.")
