@@ -142,7 +142,6 @@ def run_backtest(
         # Rebalance
         if dt in rebalance_dates:
             screen = get_screening_df(tickers, dt, prices, conn)
-            equity = cash + portfolio_value(dt)
 
             if screen.empty:
                 selected: list[str] = []
@@ -156,41 +155,41 @@ def run_backtest(
                         f"raised an error on {dt_str}:\n{e}"
                     ) from e
 
-            weight = 1.0 / len(selected) if selected else 0.0
+            currently_held = {t for t in tickers if shares[t] > 0.001}
+            new_selected   = set(selected)
+            to_sell = currently_held - new_selected   # exited selection → sell all
+            to_buy  = new_selected - currently_held   # entered selection → buy
 
-            # Sell first
-            for ticker in list(t for t in tickers if shares[t] > 0):
+            # Sell exits (full position close)
+            sell_proceeds = 0.0
+            for ticker in to_sell:
                 price = prices.loc[dt, ticker] if ticker in prices.columns else np.nan
                 if pd.isna(price):
                     continue
-                target_val = equity * (weight if ticker in selected else 0.0)
-                current_val = shares[ticker] * price
-                if current_val > target_val + 0.01:
-                    sh_sell = (current_val - target_val) / price
-                    gain = sh_sell * (price - avg_cost[ticker])
-                    realized_gains += gain
-                    cash += sh_sell * price
-                    shares[ticker] -= sh_sell
-                    event_rows.append(dict(date=dt_str, type="trade", label="Sell",
-                                          ticker=ticker, amount=sh_sell * price,
-                                          shares=-sh_sell, price=price, gain=round(gain, 2)))
+                sh_sell = shares[ticker]
+                gain = sh_sell * (price - avg_cost[ticker])
+                realized_gains += gain
+                proceeds = sh_sell * price
+                cash += proceeds
+                sell_proceeds += proceeds
+                shares[ticker] = 0.0
+                avg_cost[ticker] = 0.0
+                event_rows.append(dict(date=dt_str, type="trade", label="Sell",
+                                      ticker=ticker, amount=proceeds,
+                                      shares=-sh_sell, price=price, gain=round(gain, 2)))
 
-            # Recalc equity after sells
-            equity = cash + portfolio_value(dt)
-
-            # Buy
-            for ticker in selected:
-                price = prices.loc[dt, ticker] if ticker in prices.columns else np.nan
-                if pd.isna(price):
-                    continue
-                target_val = equity * weight
-                current_val = shares[ticker] * price
-                if target_val > current_val + 0.01:
-                    buy_val = min(target_val - current_val, cash)
-                    if buy_val <= 0:
+            # Buy entries: split proceeds equally (first run uses all available cash)
+            if to_buy:
+                available = sell_proceeds if currently_held else cash
+                per_stock = available / len(to_buy)
+                for ticker in sorted(to_buy):   # sorted for determinism
+                    price = prices.loc[dt, ticker] if ticker in prices.columns else np.nan
+                    if pd.isna(price):
+                        continue
+                    buy_val = min(per_stock, cash)
+                    if buy_val <= 0.01:
                         continue
                     sh_buy = buy_val / price
-                    # Update average cost
                     total_sh = shares[ticker] + sh_buy
                     avg_cost[ticker] = (
                         (shares[ticker] * avg_cost[ticker] + sh_buy * price) / total_sh
