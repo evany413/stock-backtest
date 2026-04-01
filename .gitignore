@@ -159,8 +159,9 @@ ehthumbs.db
 Thumbs.db
 
 # Project Specific
-us_data.db
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.pkl
 *.pickle
