@@ -52,16 +52,7 @@ if universe_choice == "Custom":
     tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
 else:
     tickers = universes[universe_choice]
-    col_u1, col_u2 = st.sidebar.columns([3, 1])
-    col_u1.caption(f"{len(tickers)} tickers")
-    if col_u2.button("↻", help="Re-fetch universe list from source"):
-        with st.spinner("Refreshing..."):
-            updated = db.refresh_universes()
-        if universe_choice in updated:
-            st.sidebar.success(f"Updated: {updated[universe_choice]} tickers")
-            st.rerun()
-        else:
-            st.sidebar.warning(f"No auto-source for '{universe_choice}'. Edit universes/{universe_choice}.txt manually.")
+    st.sidebar.caption(f"{len(tickers)} tickers")
 
 # Backtest settings
 st.sidebar.header("Backtest")
