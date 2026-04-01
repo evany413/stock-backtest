@@ -1,37 +1,86 @@
 # Stock Backtest
 
-A modular, fundamental-focused backtesting engine for US stocks.
-
-![Dashboard Screenshot](assets/image.png)
+A personal finance backtesting tool for US stocks — model your net worth growth over time with custom stock-picking strategies, income, expenses, and taxes.
 
 ## Features
-- **Data Management**: Fetches price and financial data (Balance Sheet, Income Statement) using `yfinance`.
-- **Look-ahead Bias Protection**: Automatically aligns financial data with price data, applying lags to simulate realistic reporting delays.
-- **Strategy Engine**: Supports custom strategies with flexible signal generation.
-- **Interactive UI**: Streamlit-based dashboard for running backtests and visualizing equity curves.
+
+- **Custom strategies** — write a plain Python function that returns a boolean Series; no classes, no YAML
+- **Predefined universes** — filter from S&P 500 or NASDAQ 100 (or type your own tickers)
+- **Realistic rebalancing** — only trades entries/exits; existing positions are left untouched
+- **Look-ahead bias protection** — fundamental data applied with a 60-day publication lag
+- **Personal finance model** — monthly income and one-time expenses
+- **Local data cache** — prices and fundamentals cached in SQLite via yfinance; only re-fetches when needed
+- **Interactive UI** — Streamlit dashboard with equity curve, metrics, and event log
 
 ## Prerequisites
-- Python 3.8+
+
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/) package manager
 
 ## Installation
+
 ```bash
-pip install -r requirements.txt
+git clone <repo>
+cd stock-backtest
+uv sync
 ```
 
 ## Usage
-To launch the interactive dashboard:
+
 ```bash
-streamlit run app.py
+uv run streamlit run app.py
 ```
 
-> **Important**: `yfinance` only provides recent financial data (~8 quarters). For fundamental strategies, use backtest dates from **2024 onwards** where financial data is available.
-
 ## Project Structure
-- `data_manager.py`: Handles data fetching and alignment.
-- `strategy_engine.py`: Core backtest logic and performance calculation.
-- `strategies/`: Folder containing strategy implementations.
-  - `base_strategy.py`: Abstract base class for all strategies.
-  - `value_roe.py`: Low P/B + High ROE strategy.
-  - `fundamental_value.py`: Low P/B or Low P/E strategy.
-  - `multi_factor.py`: Multi-factor strategy (Market Cap, Free Cash Flow, ROE, Operating Income Growth, Price-to-Sales).
-- `app.py`: Streamlit frontend.
+
+```
+stock-backtest/
+├── app.py              # Streamlit UI
+├── data.py             # yfinance fetch + SQLite cache
+├── engine.py           # Backtest loop and metrics
+├── strategies/         # Strategy definitions (one file per strategy)
+│   ├── buy_and_hold.py
+│   ├── low_pe.py
+│   ├── momentum.py
+│   └── value_roe.py
+├── universes/          # Ticker universe files (one ticker per line)
+│   ├── sp500.txt
+│   └── nasdaq100.txt
+└── pyproject.toml      # uv project config
+```
+
+## Writing a Strategy
+
+Create a file in `strategies/` with a `signal(df)` function. It receives a DataFrame (one row per ticker) and returns a boolean Series — `True` means "hold this ticker".
+
+```python
+# strategies/my_strategy.py
+import pandas as pd
+
+def signal(df: pd.DataFrame) -> pd.Series:
+    return (df["pe_ratio"] > 0) & (df["pe_ratio"] < 20) & (df["roe_ttm"] > 0.10)
+```
+
+Available columns in `df`:
+
+| Column | Description |
+|---|---|
+| `close` | Latest close price |
+| `ret_1m` / `ret_3m` / `ret_6m` / `ret_1y` | Price momentum (past 21/63/126/252 trading days) |
+| `pe_ratio` | Price / EPS (TTM) |
+| `pb_ratio` | Price / Book value per share |
+| `ps_ratio` | Market cap / Revenue (TTM) |
+| `roe_ttm` | Return on equity (TTM) |
+| `market_cap` | Close × shares outstanding |
+| `fcf_q` | Free cash flow (latest quarter) |
+| `eps_ttm` | Earnings per share (TTM) |
+| `bvps` | Book value per share |
+
+> **Note**: yfinance provides ~8 quarters of fundamental data. For fundamental strategies, backtest dates from 2023 onwards work best.
+
+## Backtest Model
+
+- **Rebalance**: on each rebalance date, sell tickers that left the selection, buy tickers that entered — existing holdings are unchanged
+- **Buy allocation**: sale proceeds split equally across new entries (first run uses available cash)
+- **Income**: monthly income credited on the first trading day of each month
+- **Expenses**: one-time cash deductions on a specified date

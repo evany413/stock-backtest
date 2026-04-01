@@ -14,9 +14,68 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
+import csv
+import io
+import urllib.request
+
 import yfinance as yf
 
-DB_PATH = pathlib.Path(__file__).parent / "cache.db"
+DB_PATH        = pathlib.Path(__file__).parent / "cache.db"
+UNIVERSE_DIR   = pathlib.Path(__file__).parent / "universes"
+
+# Sources for refresh_universes()
+_UNIVERSE_SOURCES: dict[str, str] = {
+    "sp500": "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv",
+}
+
+
+# ── universe ──────────────────────────────────────────────────────────────────
+
+def list_universes() -> dict[str, list[str]]:
+    """Return {display_name: [tickers]} for every .txt file in universes/."""
+    result = {}
+    if not UNIVERSE_DIR.exists():
+        return result
+    for f in sorted(UNIVERSE_DIR.glob("*.txt")):
+        tickers = [
+            line.strip().upper()
+            for line in f.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        result[f.stem] = tickers
+    return result
+
+
+def refresh_universes() -> dict[str, int]:
+    """
+    Re-fetch known universe files from their sources and overwrite the local .txt files.
+    Returns {name: ticker_count} for each updated universe.
+    Add custom sources to _UNIVERSE_SOURCES above.
+    """
+    UNIVERSE_DIR.mkdir(exist_ok=True)
+    results = {}
+
+    for name, url in _UNIVERSE_SOURCES.items():
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = r.read().decode()
+
+            reader = csv.DictReader(io.StringIO(data))
+            # Column is 'Symbol' for the GitHub S&P 500 CSV
+            ticker_col = next((c for c in reader.fieldnames if c.strip().lower() in ("symbol", "ticker")), None)
+            if ticker_col is None:
+                print(f"  {name}: no Symbol/Ticker column found, skipping")
+                continue
+
+            tickers = [row[ticker_col].strip().replace(".", "-") for row in reader if row[ticker_col].strip()]
+            (UNIVERSE_DIR / f"{name}.txt").write_text("\n".join(tickers), encoding="utf-8")
+            results[name] = len(tickers)
+            print(f"  {name}: {len(tickers)} tickers written")
+        except Exception as e:
+            print(f"  {name}: fetch failed – {e}")
+
+    return results
 
 
 # ── connection ────────────────────────────────────────────────────────────────

@@ -5,7 +5,6 @@ Simple model:
   - Equal-weight the tickers selected by the strategy signal
   - Rebalance monthly or weekly
   - Monthly income and one-time expenses applied on their dates
-  - Capital gains tax settled at year-end (flat rate, total gains only)
   - No slippage, no commissions
 """
 from __future__ import annotations
@@ -54,7 +53,6 @@ def run_backtest(
     initial_capital: float,
     monthly_income: float,
     expenses: list[dict],        # [{"date": "YYYY-MM-DD", "label": str, "amount": float}]
-    tax_rate: float,             # flat capital-gains rate, applied yearly
     rebalance_freq: str,         # "monthly" | "weekly"
     conn: sqlite3.Connection,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -62,7 +60,7 @@ def run_backtest(
     Returns
     -------
     equity_df   DatetimeIndex, columns: cash / portfolio / net_worth /
-                cumulative_income / cumulative_expenses / cumulative_taxes
+                cumulative_income / cumulative_expenses
     events_df   columns: date / type / label / ticker / amount / shares / price / gain
     """
     prices = get_prices(tickers, start, end, conn)
@@ -87,11 +85,7 @@ def run_backtest(
     shares: dict[str, float] = {t: 0.0 for t in tickers}
     avg_cost: dict[str, float] = {t: 0.0 for t in tickers}  # average cost per share
 
-    # Tax accumulator (reset each calendar year)
-    realized_gains = 0.0
-    current_year = pd.Timestamp(start).year
-
-    cum_income = cum_expenses = cum_taxes = 0.0
+    cum_income = cum_expenses = 0.0
     equity_rows: list[dict] = []
     event_rows: list[dict] = []
 
@@ -102,26 +96,10 @@ def run_backtest(
             if shares[t] > 0 and t in prices.columns and pd.notna(prices.loc[dt, t])
         )
 
-    def settle_taxes(year: int):
-        nonlocal cash, cum_taxes, realized_gains
-        tax = max(0.0, realized_gains) * tax_rate
-        if tax > 0:
-            cash -= tax
-            cum_taxes += tax
-            event_rows.append(dict(date=f"{year}-12-31", type="tax",
-                                   label=f"{year} capital gains tax",
-                                   ticker=None, amount=-tax, shares=None, price=None, gain=None))
-        realized_gains = 0.0
-
     prev_dt: pd.Timestamp | None = None
 
     for dt in prices.index:
         dt_str = str(dt.date())
-
-        # Year rollover → settle previous year's taxes
-        if dt.year != current_year:
-            settle_taxes(current_year)
-            current_year = dt.year
 
         # Monthly income (credit on 1st trading day of each month)
         if monthly_income > 0 and (prev_dt is None or dt.month != prev_dt.month):
@@ -168,7 +146,6 @@ def run_backtest(
                     continue
                 sh_sell = shares[ticker]
                 gain = sh_sell * (price - avg_cost[ticker])
-                realized_gains += gain
                 proceeds = sh_sell * price
                 cash += proceeds
                 sell_proceeds += proceeds
@@ -202,11 +179,8 @@ def run_backtest(
 
         pv = portfolio_value(dt)
         equity_rows.append(dict(date=dt, cash=cash, portfolio=pv, net_worth=cash + pv,
-                                cum_income=cum_income, cum_expenses=cum_expenses,
-                                cum_taxes=cum_taxes))
+                                cum_income=cum_income, cum_expenses=cum_expenses))
         prev_dt = dt
-
-    settle_taxes(current_year)
 
     equity_df = pd.DataFrame(equity_rows).set_index("date")
     events_df = pd.DataFrame(event_rows) if event_rows else pd.DataFrame()
@@ -233,5 +207,4 @@ def calculate_metrics(equity_df: pd.DataFrame, initial_capital: float) -> dict:
         "Sharpe Ratio":      sharpe,
         "Total Income":      float(equity_df["cum_income"].iloc[-1]),
         "Total Expenses":    float(equity_df["cum_expenses"].iloc[-1]),
-        "Total Taxes":       float(equity_df["cum_taxes"].iloc[-1]),
     }

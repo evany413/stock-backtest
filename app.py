@@ -39,11 +39,29 @@ with st.sidebar.expander("Strategy source"):
 
 # Tickers
 st.sidebar.header("Ticker Universe")
-ticker_input = st.sidebar.text_area(
-    "Tickers (comma separated)",
-    value="AAPL, MSFT, GOOG, AMZN, META, NVDA, JPM, JNJ, V, WMT",
-)
-tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
+universes = db.list_universes()
+universe_options = ["Custom"] + list(universes.keys())
+universe_choice = st.sidebar.selectbox("Universe", universe_options,
+                                        help="Pick a predefined universe or enter tickers manually")
+
+if universe_choice == "Custom":
+    ticker_input = st.sidebar.text_area(
+        "Tickers (comma separated)",
+        value="AAPL, MSFT, GOOG, AMZN, META, NVDA, JPM, JNJ, V, WMT",
+    )
+    tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
+else:
+    tickers = universes[universe_choice]
+    col_u1, col_u2 = st.sidebar.columns([3, 1])
+    col_u1.caption(f"{len(tickers)} tickers")
+    if col_u2.button("↻", help="Re-fetch universe list from source"):
+        with st.spinner("Refreshing..."):
+            updated = db.refresh_universes()
+        if universe_choice in updated:
+            st.sidebar.success(f"Updated: {updated[universe_choice]} tickers")
+            st.rerun()
+        else:
+            st.sidebar.warning(f"No auto-source for '{universe_choice}'. Edit universes/{universe_choice}.txt manually.")
 
 # Backtest settings
 st.sidebar.header("Backtest")
@@ -53,13 +71,10 @@ end_date   = col_b.date_input("End",   datetime(2025, 1, 1))
 initial_capital = st.sidebar.number_input("Initial Capital ($)", value=100_000, step=10_000)
 rebalance_freq  = st.sidebar.selectbox("Rebalance", ["monthly", "weekly"])
 
-# Income & tax
-st.sidebar.header("Income & Tax")
+# Income
+st.sidebar.header("Income")
 monthly_income = st.sidebar.number_input("Monthly Income ($)", value=0, step=500,
                                           help="Credited on the 1st trading day of each month")
-tax_rate = st.sidebar.slider("Capital Gains Tax Rate", 0.0, 0.5, 0.20, 0.01,
-                              format="%.0f%%",
-                              help="Applied once a year on total realized gains")
 
 # One-time expenses
 st.sidebar.header("One-Time Expenses")
@@ -109,7 +124,6 @@ if run_btn:
                 initial_capital=float(initial_capital),
                 monthly_income=float(monthly_income),
                 expenses=st.session_state.get("expenses", []),
-                tax_rate=float(tax_rate),
                 rebalance_freq=rebalance_freq,
                 conn=conn,
             )
@@ -155,10 +169,9 @@ if "equity_df" in st.session_state and not st.session_state["equity_df"].empty:
     st.plotly_chart(fig, use_container_width=True)
 
     # Cash flow summary
-    r1, r2, r3 = st.columns(3)
+    r1, r2 = st.columns(2)
     r1.metric("Total Income",   f"${metrics['Total Income']:,.0f}")
     r2.metric("Total Expenses", f"${metrics['Total Expenses']:,.0f}")
-    r3.metric("Total Taxes",    f"${metrics['Total Taxes']:,.0f}")
 
     # Event log
     if not events_df.empty:
