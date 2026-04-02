@@ -1,15 +1,15 @@
 # Stock Backtest
 
-A personal finance backtesting tool for US stocks — model your net worth growth over time with custom stock-picking strategies, income, expenses, and taxes.
+A personal finance backtesting tool for US stocks — model your net worth growth over time with custom stock-picking strategies, income, and expenses.
 
 ## Features
 
 - **Custom strategies** — write a plain Python function that returns a boolean Series; no classes, no YAML
 - **Predefined universes** — filter from S&P 500 or NASDAQ 100 (or type your own tickers)
 - **Realistic rebalancing** — only trades entries/exits; existing positions are left untouched
-- **Look-ahead bias protection** — fundamental data applied with a 60-day publication lag
+- **Look-ahead bias protection** — fundamental data keyed to SEC filing date, no estimated lag
 - **Personal finance model** — monthly income and one-time expenses
-- **Local data cache** — prices and fundamentals cached in SQLite via yfinance; only re-fetches when needed
+- **Local data cache** — prices and fundamentals cached in SQLite via FMP; only re-fetches when needed
 - **Interactive UI** — Streamlit dashboard with equity curve, metrics, and event log
 
 ## Prerequisites
@@ -25,6 +25,12 @@ cd stock-backtest
 uv sync
 ```
 
+Add your [FMP API key](https://financialmodelingprep.com/developer/docs) to `.streamlit/secrets.toml`:
+
+```toml
+FMP_API_KEY = "your_key_here"
+```
+
 ## Usage
 
 ```bash
@@ -36,7 +42,7 @@ uv run streamlit run app.py
 ```
 stock-backtest/
 ├── app.py              # Streamlit UI
-├── data.py             # yfinance fetch + SQLite cache
+├── data.py             # FMP fetch + SQLite cache
 ├── engine.py           # Backtest loop and metrics
 ├── strategies/         # Strategy definitions (one file per strategy)
 │   ├── buy_and_hold.py
@@ -76,7 +82,7 @@ Available columns in `df`:
 | `eps_ttm` | Earnings per share (TTM) |
 | `bvps` | Book value per share |
 
-> **Note**: yfinance provides ~8 quarters of fundamental data. For fundamental strategies, backtest dates from 2023 onwards work best.
+> **Note**: FMP free tier provides ~5 years of fundamental history. Set your API key in `.streamlit/secrets.toml` as `FMP_API_KEY = "your_key"`.
 
 ## Backtest Model
 
