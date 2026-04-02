@@ -1,27 +1,61 @@
 """
-data.py  –  yfinance fetch + SQLite local cache
+data.py  –  FMP fetch + SQLite local cache
 
-Schema (wide, no EAV):
+Schema:
   prices        (ticker, date, close)
   fundamentals  (ticker, pub_date, eps_ttm, bvps, roe_ttm, revenue_ttm, fcf_q, shares)
   fetch_log     (ticker, prices_until, fundamentals_at)
 """
 from __future__ import annotations
 
-import sqlite3
+import json
+import os
 import pathlib
-from datetime import datetime, timedelta
+import sqlite3
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 
-import yfinance as yf
+DB_PATH      = pathlib.Path(__file__).parent / "cache.db"
+UNIVERSE_DIR = pathlib.Path(__file__).parent / "universes"
+FMP_BASE     = "https://financialmodelingprep.com/api/v3"
 
-DB_PATH        = pathlib.Path(__file__).parent / "cache.db"
-UNIVERSE_DIR   = pathlib.Path(__file__).parent / "universes"
+
+def _api_key() -> str:
+    # Streamlit secrets take priority, then environment variable
+    try:
+        import streamlit as st
+        return st.secrets["FMP_API_KEY"]
+    except Exception:
+        pass
+    key = os.environ.get("FMP_API_KEY", "")
+    if not key:
+        raise RuntimeError(
+            "FMP API key not found. Set FMP_API_KEY in .streamlit/secrets.toml or as an environment variable."
+        )
+    return key
+
+
+def _get(path: str, **params) -> dict | list:
+    qs = "&".join(f"{k}={v}" for k, v in params.items())
+    url = f"{FMP_BASE}{path}?apikey={_api_key()}&{qs}" if qs else f"{FMP_BASE}{path}?apikey={_api_key()}"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            raise RuntimeError(f"FMP 403: '{path}' not available on free tier") from e
+        raise
+    finally:
+        time.sleep(0.3)  # avoid rate limiting on free tier
 
 
 # ── universe ──────────────────────────────────────────────────────────────────
+
 
 def list_universes() -> dict[str, list[str]]:
     """Return {display_name: [tickers]} for every .txt file in universes/."""
@@ -36,7 +70,6 @@ def list_universes() -> dict[str, list[str]]:
         ]
         result[f.stem] = tickers
     return result
-
 
 
 # ── connection ────────────────────────────────────────────────────────────────
@@ -70,10 +103,7 @@ def get_db() -> sqlite3.Connection:
 # ── fetch & cache ─────────────────────────────────────────────────────────────
 
 def ensure_data(tickers: list[str], start: str, end: str, conn: sqlite3.Connection):
-    """
-    Fetch missing price + fundamental data from yfinance and store locally.
-    Only re-fetches if cache doesn't cover the requested range.
-    """
+    """Fetch missing price + fundamental data from FMP and store locally."""
     to_fetch = []
     for ticker in tickers:
         row = conn.execute(
@@ -85,83 +115,92 @@ def ensure_data(tickers: list[str], start: str, end: str, conn: sqlite3.Connecti
     if not to_fetch:
         return
 
-    # ── prices ────────────────────────────────────────────────────────────────
-    print(f"Fetching prices: {to_fetch}")
+    print(f"Fetching {len(to_fetch)} tickers from FMP...")
     for ticker in to_fetch:
-        try:
-            hist = yf.Ticker(ticker).history(start=start, end=end, auto_adjust=True)
-            if hist.empty:
-                continue
-            rows = [
-                (ticker, str(idx.date()), float(row["Close"]))
-                for idx, row in hist.iterrows()
-                if pd.notna(row["Close"])
-            ]
-            conn.executemany(
-                "INSERT OR REPLACE INTO prices VALUES (?,?,?)", rows
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO fetch_log (ticker, prices_until) VALUES (?,?)"
-                " ON CONFLICT(ticker) DO UPDATE SET prices_until=excluded.prices_until",
-                (ticker, end),
-            )
-        except Exception as e:
-            print(f"  {ticker} price error: {e}")
-
-    conn.commit()
-
-    # ── fundamentals ──────────────────────────────────────────────────────────
-    print(f"Fetching fundamentals: {to_fetch}")
-    for ticker in to_fetch:
+        _fetch_prices(ticker, start, end, conn)
         _fetch_fundamentals(ticker, conn)
 
 
-def _fetch_fundamentals(ticker: str, conn: sqlite3.Connection):
-    """Compute TTM metrics from quarterly data, store with 60-day publication lag."""
+def _fetch_prices(ticker: str, start: str, end: str, conn: sqlite3.Connection):
     try:
-        t = yf.Ticker(ticker)
-
-        # Merge quarterly financials, balance sheet, cashflow
-        dfs = [df.T for df in [t.quarterly_financials, t.quarterly_balance_sheet, t.quarterly_cashflow]
-               if not df.empty]
-        if not dfs:
+        data = _get(f"/historical-price-full/{ticker}", **{"from": start, "to": end})
+        historical = data.get("historical", []) if isinstance(data, dict) else []
+        if not historical:
+            print(f"  {ticker}: no price data")
             return
 
-        q = pd.concat(dfs, axis=1).loc[:, lambda df: ~df.columns.duplicated()]
-        q.index = pd.to_datetime(q.index)
-        q = q.sort_index()
+        rows = [
+            (ticker, item["date"], float(item["close"]))
+            for item in historical
+            if item.get("close") is not None
+        ]
+        conn.executemany("INSERT OR REPLACE INTO prices VALUES (?,?,?)", rows)
+        conn.execute(
+            "INSERT OR REPLACE INTO fetch_log (ticker, prices_until) VALUES (?,?)"
+            " ON CONFLICT(ticker) DO UPDATE SET prices_until=excluded.prices_until",
+            (ticker, end),
+        )
+        conn.commit()
+        print(f"  {ticker}: {len(rows)} price rows")
+    except Exception as e:
+        print(f"  {ticker} price error: {e}")
 
-        def get(col: str) -> pd.Series:
-            return q[col] if col in q.columns else pd.Series(np.nan, index=q.index)
 
-        shares  = get("Ordinary Shares Number").replace(0, np.nan)
-        net_inc = get("Net Income")
-        equity  = get("Stockholders Equity").replace(0, np.nan)
-        op_cf   = get("Operating Cash Flow")
-        capex   = get("Capital Expenditure")
-        revenue = get("Total Revenue")
+def _fetch_fundamentals(ticker: str, conn: sqlite3.Connection):
+    """Fetch quarterly financials from FMP and compute TTM metrics.
+    Uses fillingDate as pub_date to avoid look-ahead bias.
+    """
+    try:
+        income   = _get(f"/income-statement/{ticker}",       period="quarter", limit=20)
+        balance  = _get(f"/balance-sheet-statement/{ticker}", period="quarter", limit=20)
+        cashflow = _get(f"/cash-flow-statement/{ticker}",     period="quarter", limit=20)
 
-        # Rolling TTM = sum of last 4 quarters
-        ttm_inc = net_inc.rolling(4, min_periods=2).sum()
-        ttm_rev = revenue.rolling(4, min_periods=2).sum()
+        if not income:
+            print(f"  {ticker}: no fundamental data")
+            return
+
+        # Index balance + cashflow by period date for O(1) lookup
+        bal_map = {r["date"]: r for r in balance}
+        cf_map  = {r["date"]: r for r in cashflow}
+
+        # Sort oldest → newest for rolling TTM sum
+        income = sorted(income, key=lambda r: r["date"])
+        net_inc_series = [r.get("netIncome") or 0 for r in income]
+        rev_series     = [r.get("revenue")   or 0 for r in income]
 
         rows = []
-        for period, _ in q.iterrows():
-            pub = (period + timedelta(days=60)).strftime("%Y-%m-%d")
-            s = shares.get(period)
-            e = equity.get(period)
-            ti = ttm_inc.get(period)
-            tr = ttm_rev.get(period)
-            fc = (op_cf.get(period, np.nan) or 0) + (capex.get(period, np.nan) or 0)
+        for i, inc in enumerate(income):
+            period_date = inc["date"]
+            # fillingDate = actual SEC filing date, eliminates need for estimated lag
+            pub_date = (
+                inc.get("fillingDate")
+                or inc.get("acceptedDate")
+                or period_date
+            )
+
+            bal = bal_map.get(period_date, {})
+            cf  = cf_map.get(period_date, {})
+
+            shares = inc.get("weightedAverageShsOut") or None
+            equity = bal.get("totalStockholdersEquity") or None
+            op_cf  = cf.get("operatingCashFlow") or 0
+            capex  = cf.get("capitalExpenditure") or 0  # typically negative in FMP
+
+            # TTM = sum of this + up to 3 prior quarters
+            ttm_start = max(0, i - 3)
+            ttm_inc = sum(net_inc_series[ttm_start : i + 1])
+            ttm_rev = sum(rev_series[ttm_start : i + 1])
+            fcf_q   = op_cf + capex
 
             rows.append((
-                ticker, pub,
-                float(ti / s)  if (s and pd.notna(ti) and pd.notna(s)) else None,   # eps_ttm
-                float(e  / s)  if (s and pd.notna(e)  and pd.notna(s)) else None,   # bvps
-                float(ti / e)  if (e and pd.notna(ti) and pd.notna(e)) else None,   # roe_ttm
-                float(tr)      if pd.notna(tr) else None,                            # revenue_ttm
-                float(fc)      if (pd.notna(fc) and fc != 0) else None,             # fcf_q
-                float(s)       if pd.notna(s) else None,                            # shares
+                ticker,
+                pub_date,
+                float(ttm_inc / shares) if shares and shares > 0 else None,   # eps_ttm
+                float(equity  / shares) if shares and shares > 0 and equity else None,  # bvps
+                float(ttm_inc / equity) if equity and equity > 0 else None,   # roe_ttm
+                float(ttm_rev)          if ttm_rev else None,                  # revenue_ttm
+                float(fcf_q)            if fcf_q  else None,                  # fcf_q
+                float(shares)           if shares else None,                   # shares
             ))
 
         conn.executemany(
@@ -173,8 +212,7 @@ def _fetch_fundamentals(ticker: str, conn: sqlite3.Connection):
             (ticker, datetime.now().strftime("%Y-%m-%d")),
         )
         conn.commit()
-        print(f"  {ticker}: {len(rows)} fundamental rows stored")
-
+        print(f"  {ticker}: {len(rows)} fundamental rows")
     except Exception as e:
         print(f"  {ticker} fundamentals error: {e}")
 
