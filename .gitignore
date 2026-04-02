@@ -169,5 +169,6 @@ Thumbs.db
 *.pkl
 *.pickle
 data/
+data_lake/
 temp/
 tmp/

@@ -8,4 +8,6 @@ dependencies = [
     "pandas>=2.2",
     "plotly>=5.20",
     "numpy>=1.26",
+    "duckdb>=1.5.1",
+    "pyarrow>=23.0.1",
 ]

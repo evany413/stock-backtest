@@ -16,7 +16,7 @@ st.set_page_config(page_title="Finance Backtest", layout="wide")
 
 @st.cache_resource
 def get_conn():
-    return db.get_db()
+    return db.get_db()  # in-memory DuckDB; data lives in data_lake/ parquet files
 
 conn = get_conn()
 
@@ -47,7 +47,7 @@ universe_choice = st.sidebar.selectbox("Universe", universe_options,
 if universe_choice == "Custom":
     ticker_input = st.sidebar.text_area(
         "Tickers (comma separated)",
-        value="AAPL, MSFT, GOOG, AMZN, META, NVDA, JPM, JNJ, V, WMT",
+        value="AAPL, MSFT, GOOGL, AMZN, META, NVDA, JPM, JNJ, V, WMT",
     )
     tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
 else:

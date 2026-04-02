@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
-import sqlite3
 import types
 
+import duckdb
 import numpy as np
 import pandas as pd
 
@@ -54,7 +54,7 @@ def run_backtest(
     monthly_income: float,
     expenses: list[dict],        # [{"date": "YYYY-MM-DD", "label": str, "amount": float}]
     rebalance_freq: str,         # "monthly" | "weekly"
-    conn: sqlite3.Connection,
+    conn: duckdb.DuckDBPyConnection,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Returns
