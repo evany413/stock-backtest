@@ -155,10 +155,9 @@ def run_backtest(
                                       ticker=ticker, amount=proceeds,
                                       shares=-sh_sell, price=price, gain=round(gain, 2)))
 
-            # Buy entries: split proceeds equally (first run uses all available cash)
+            # Buy entries: split all available cash equally (includes sell proceeds + accumulated income)
             if to_buy:
-                available = sell_proceeds if currently_held else cash
-                per_stock = available / len(to_buy)
+                per_stock = cash / len(to_buy)
                 for ticker in sorted(to_buy):   # sorted for determinism
                     price = prices.loc[dt, ticker] if ticker in prices.columns else np.nan
                     if pd.isna(price):
